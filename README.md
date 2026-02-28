@@ -1,12 +1,12 @@
 # vpn-check
 
-CLI app (Bun) to verify whether an IP is already used by a WireGuard peer.
+CLI app (Bun) to verify whether an IP is already used by a WireGuard peer. Queries wg-dashboard API.
 
 ## Setup
 
 1. Copy `.env.example` to `.env`.
 2. Set `WG_DASHBOARD_BASE_URL` to your dashboard base URL.
-3. (Optional) Set `WG_DASHBOARD_TOKEN` if your API requires Bearer auth.
+3. Set `WG_DASHBOARD_TOKEN` to your API token.
 4. Set `WG_CONFIGURATION_NAME` (for example `wg0`).
 
 ## Run
@@ -33,9 +33,9 @@ Run it directly:
 ./dist/vpn-check.exe
 ```
 
-## Bake config into exe
+## Bake config into the binary
 
-If you want the `.exe` to run without a `.env`, set values in [src/baked-config.ts](src/baked-config.ts) and rebuild:
+If you want the binary to run without a `.env`, set values in [src/baked-config.ts](src/baked-config.ts) and rebuild:
 
 ```ts
 export const BAKED_WG_DASHBOARD_BASE_URL = "https://your-wg-dashboard";
@@ -80,11 +80,11 @@ bun run src/index.ts --version
 The peer name is parsed from keys like:
 
 ```text
-CRAB-LS 274 - CzMZhRjADmX3HmCx8PLQePSGoscEOPRg5+aOAk3/ZHA=
+ALice Laptop - CzMZhRjADmX3HmCx8PLQePSGoscEOPRg5+aOAk3/ZHA=
 ```
 
 and shown as:
 
 ```text
-CRAB-LS 274
+ALice Laptop
 ```
