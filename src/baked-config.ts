@@ -1,0 +1,4 @@
+export const BAKED_WG_DASHBOARD_BASE_URL = "http://46.101.216.71:10086";
+export const BAKED_WG_DASHBOARD_TOKEN = "K9nowHO6lLMELnob9l6UICm3fTsZNt1ytjYdB3YxVdk";
+export const BAKED_WG_DASHBOARD_TIMEOUT_MS = "10000";
+export const BAKED_WG_CONFIGURATION_NAME = "wg0";
