@@ -36,6 +36,25 @@ const APP_VERSION = String(packageJson.version ?? "0.0.0");
 const RAW_CONFIG_ENDPOINT_PATH = "/api/getWireguardConfigurationRawFile";
 const PEERS_ENDPOINT_PATH = "/api/ping/getAllPeersIpAddress";
 
+// ── ANSI colors (only when writing to a real terminal) ──────────────────────
+
+const isTTY = process.stdout.isTTY === true;
+const c = {
+  reset:  isTTY ? "\x1b[0m"  : "",
+  bold:   isTTY ? "\x1b[1m"  : "",
+  dim:    isTTY ? "\x1b[2m"  : "",
+  green:  isTTY ? "\x1b[32m" : "",
+  red:    isTTY ? "\x1b[31m" : "",
+  yellow: isTTY ? "\x1b[33m" : "",
+  cyan:   isTTY ? "\x1b[36m" : "",
+};
+
+function clr(color: keyof typeof c, text: string): string {
+  return `${c[color]}${text}${c.reset}`;
+}
+
+// ── IP / CIDR helpers ────────────────────────────────────────────────────────
+
 function normalizeBaseUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, "");
 }
@@ -91,6 +110,16 @@ function rangesOverlap(a: Ipv4Network, b: Ipv4Network): boolean {
   return a.start <= b.end && b.start <= a.end;
 }
 
+/** Human-readable summary of a network range. */
+function describeRange(net: Ipv4Network): string {
+  if (net.maskBits === 32) return intToIpv4(net.start);
+  const count = net.end - net.start + 1;
+  const countStr = count.toLocaleString("en-US");
+  return `${intToIpv4(net.start)} – ${intToIpv4(net.end)}  (${countStr} addresses, /${net.maskBits})`;
+}
+
+// ── API helpers ──────────────────────────────────────────────────────────────
+
 function getDashboardBaseAndHeaders(): { baseUrl: string; headers: Record<string, string> } {
   const base = process.env.WG_DASHBOARD_BASE_URL?.trim() || BAKED_WG_DASHBOARD_BASE_URL.trim();
   if (!base) {
@@ -120,11 +149,7 @@ async function fetchWireguardRawConfig(): Promise<string> {
 
   try {
     const url = `${baseUrl}${RAW_CONFIG_ENDPOINT_PATH}?configurationName=${encodeURIComponent(configurationName)}`;
-    const response = await fetch(url, {
-      method: "GET",
-      headers,
-      signal: controller.signal,
-    });
+    const response = await fetch(url, { method: "GET", headers, signal: controller.signal });
 
     if (!response.ok) {
       throw new Error(`WG Dashboard request failed (${response.status} ${response.statusText}).`);
@@ -132,12 +157,9 @@ async function fetchWireguardRawConfig(): Promise<string> {
     const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
     if (contentType.includes("application/json")) {
       const body = (await response.json()) as { data?: { content?: string }; status?: boolean; message?: string };
-      if (typeof body.data?.content === "string") {
-        return body.data.content;
-      }
+      if (typeof body.data?.content === "string") return body.data.content;
       throw new Error("Unexpected response shape: expected JSON data string.");
     }
-
     return await response.text();
   } catch (err) {
     if (err instanceof Error && err.name === "AbortError") {
@@ -189,9 +211,7 @@ async function fetchPeerNameByPublicKey(): Promise<Map<string, string>> {
     for (const peers of Object.values(body.data)) {
       for (const peerKey of Object.keys(peers)) {
         const publicKey = extractPublicKeyFromPeerKey(peerKey);
-        if (publicKey) {
-          nameByPublicKey.set(publicKey, extractPeerName(peerKey));
-        }
+        if (publicKey) nameByPublicKey.set(publicKey, extractPeerName(peerKey));
       }
     }
     return nameByPublicKey;
@@ -204,6 +224,8 @@ async function fetchPeerNameByPublicKey(): Promise<Map<string, string>> {
     clearTimeout(timeout);
   }
 }
+
+// ── Config parsing ───────────────────────────────────────────────────────────
 
 function parsePeersFromConfig(rawConfig: string, peerNameByPublicKey: Map<string, string>): ParsedPeer[] {
   const peers: ParsedPeer[] = [];
@@ -262,23 +284,24 @@ function parsePeersFromConfig(rawConfig: string, peerNameByPublicKey: Map<string
   return peers;
 }
 
+// ── Lookup helpers ───────────────────────────────────────────────────────────
+
 function findOwnerName(peers: ParsedPeer[], targetIp: string): string | null {
   const targetNetwork = parseIpv4Network(targetIp);
   if (!targetNetwork) return null;
-
   for (const peer of peers) {
     for (const allowedIp of peer.allowedIps) {
       const allowedNetwork = parseIpv4Network(allowedIp);
-      if (allowedNetwork && rangesOverlap(targetNetwork, allowedNetwork)) {
-        return peer.name;
-      }
+      if (allowedNetwork && rangesOverlap(targetNetwork, allowedNetwork)) return peer.name;
     }
   }
-
   return null;
 }
 
-function findConflictsInRange(peers: ParsedPeer[], targetRange: Ipv4Network): Array<{ owner: string; range: string; start: number }> {
+function findConflictsInRange(
+  peers: ParsedPeer[],
+  targetRange: Ipv4Network,
+): Array<{ owner: string; range: string; start: number }> {
   const conflicts = new Map<string, { owner: string; range: string; start: number }>();
   for (const peer of peers) {
     for (const allowedIp of peer.allowedIps) {
@@ -290,8 +313,97 @@ function findConflictsInRange(peers: ParsedPeer[], targetRange: Ipv4Network): Ar
       }
     }
   }
-
   return [...conflicts.values()].sort((a, b) => a.start - b.start || a.owner.localeCompare(b.owner));
+}
+
+// ── Output helpers ───────────────────────────────────────────────────────────
+
+const QUIT_WORDS = new Set(["q", "quit", "exit", ":q", "bye"]);
+
+function isQuitCommand(s: string): boolean {
+  return QUIT_WORDS.has(s.toLowerCase());
+}
+
+function printBanner(): void {
+  const line = "─".repeat(48);
+  console.log(`\n${clr("bold", `  VPN IP Checker  v${APP_VERSION}`)}`);
+  console.log(clr("dim", `  ${line}`));
+  console.log(clr("dim", "  Enter an IPv4 address or CIDR range to check."));
+  console.log(clr("dim", '  Type "exit" or press Ctrl+C to quit.\n'));
+}
+
+function showFetching(): () => void {
+  if (!isTTY) return () => {};
+  process.stdout.write(clr("dim", "  Fetching…"));
+  return () => process.stdout.write("\r" + " ".repeat(12) + "\r");
+}
+
+function printSingleIpResult(ip: string, owner: string | null): void {
+  if (owner) {
+    console.log(`  ${clr("red", "✗")}  ${clr("bold", ip)} is ${clr("red", "taken")} by ${clr("yellow", owner)}`);
+  } else {
+    console.log(`  ${clr("green", "✓")}  ${clr("bold", ip)} is ${clr("green", "available")}`);
+  }
+}
+
+function printRangeResult(
+  net: Ipv4Network,
+  conflicts: Array<{ owner: string; range: string; start: number }>,
+): void {
+  const rangeLabel = describeRange(net);
+  console.log(`  ${clr("dim", "Range:")} ${clr("bold", rangeLabel)}`);
+
+  if (conflicts.length === 0) {
+    console.log(`  ${clr("green", "✓")}  No conflicts — range is fully available`);
+    return;
+  }
+
+  const word = conflicts.length === 1 ? "conflict" : "conflicts";
+  console.log(`  ${clr("red", "✗")}  ${clr("red", String(conflicts.length))} ${word} found:\n`);
+
+  const maxRangeLen = Math.max(...conflicts.map((x) => x.range.length));
+  for (const { range, owner } of conflicts) {
+    const padded = range.padEnd(maxRangeLen);
+    console.log(`     ${clr("yellow", padded)}  ${clr("dim", "→")}  ${owner}`);
+  }
+}
+
+// ── Main ─────────────────────────────────────────────────────────────────────
+
+async function runOnce(rawInput: string): Promise<void> {
+  const targetNetwork = parseIpv4Network(rawInput);
+  if (!targetNetwork) {
+    console.error(`  ${clr("red", "!")}  Invalid IPv4 address or CIDR range: ${clr("bold", rawInput)}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const clearFetching = showFetching();
+  let rawConfig: string;
+  let peerNameByPublicKey: Map<string, string>;
+  try {
+    [rawConfig, peerNameByPublicKey] = await Promise.all([
+      fetchWireguardRawConfig(),
+      fetchPeerNameByPublicKey(),
+    ]);
+  } catch (err) {
+    clearFetching();
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`  ${clr("red", "!")}  ${message}`);
+    process.exitCode = 1;
+    return;
+  }
+  clearFetching();
+
+  const peers = parsePeersFromConfig(rawConfig, peerNameByPublicKey);
+
+  if (targetNetwork.maskBits === 32) {
+    const owner = findOwnerName(peers, targetNetwork.input);
+    printSingleIpResult(targetNetwork.input, owner);
+  } else {
+    const conflicts = findConflictsInRange(peers, targetNetwork);
+    printRangeResult(targetNetwork, conflicts);
+  }
 }
 
 async function main() {
@@ -300,57 +412,76 @@ async function main() {
     return;
   }
 
+  const argIp = process.argv.slice(2).find((a) => !a.startsWith("-"));
+  if (argIp !== undefined) {
+    await runOnce(argIp);
+    return;
+  }
+
+  printBanner();
+
   const rl = createInterface({ input, output });
+
+  rl.on("SIGINT", () => {
+    console.log("\n  Goodbye.");
+    rl.close();
+    process.exit(0);
+  });
+
   try {
     while (true) {
       let rawInput = "";
       try {
-        rawInput = (await rl.question("Enter IP to check (or q to quit): ")).trim();
+        rawInput = (await rl.question(clr("cyan", "  > "))).trim();
       } catch (err) {
-        if (err instanceof Error && err.message.toLowerCase().includes("readline was closed")) {
-          break;
-        }
-        throw err;
+        // EOF / readline closed
+        break;
       }
 
-      if (rawInput.toLowerCase() === "q") {
+      if (!rawInput) continue;
+
+      if (isQuitCommand(rawInput)) {
+        console.log("  Goodbye.");
         break;
       }
 
       const targetNetwork = parseIpv4Network(rawInput);
-
       if (!targetNetwork) {
-        console.error("Invalid IPv4 or CIDR range.");
+        console.log(`  ${clr("red", "!")}  Invalid IPv4 address or CIDR range: ${clr("bold", rawInput)}\n`);
         continue;
       }
-      const [rawConfig, peerNameByPublicKey] = await Promise.all([
-        fetchWireguardRawConfig(),
-        fetchPeerNameByPublicKey(),
-      ]);
+
+      const clearFetching = showFetching();
+      let rawConfig: string;
+      let peerNameByPublicKey: Map<string, string>;
+      try {
+        [rawConfig, peerNameByPublicKey] = await Promise.all([
+          fetchWireguardRawConfig(),
+          fetchPeerNameByPublicKey(),
+        ]);
+      } catch (err) {
+        clearFetching();
+        const message = err instanceof Error ? err.message : String(err);
+        console.log(`  ${clr("red", "!")}  ${message}\n`);
+        continue;
+      }
+      clearFetching();
+
       const peers = parsePeersFromConfig(rawConfig, peerNameByPublicKey);
 
       if (targetNetwork.maskBits === 32) {
-        const ownerName = findOwnerName(peers, targetNetwork.input);
-        if (ownerName) {
-          console.log(`Taken by: ${ownerName}`);
-          continue;
-        }
-        console.log("Available");
-        continue;
+        const owner = findOwnerName(peers, targetNetwork.input);
+        printSingleIpResult(targetNetwork.input, owner);
+      } else {
+        const conflicts = findConflictsInRange(peers, targetNetwork);
+        printRangeResult(targetNetwork, conflicts);
       }
 
-      const conflicts = findConflictsInRange(peers, targetNetwork);
-      if (!conflicts.length) {
-        console.log("No conflicts in range.");
-        continue;
-      }
-      for (const conflict of conflicts) {
-        console.log(`${conflict.range} -> ${conflict.owner}`);
-      }
+      console.log();
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error.";
-    console.error(`Error: ${message}`);
+    console.error(`\n  ${clr("red", "Error:")} ${message}`);
     process.exitCode = 1;
   } finally {
     rl.close();

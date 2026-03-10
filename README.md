@@ -11,8 +11,17 @@ CLI app (Bun) to verify whether an IP is already used by a WireGuard peer. Queri
 
 ## Run
 
+Interactive REPL (prompts for IPs until you quit):
+
 ```bash
 bun run src/index.ts
+```
+
+Single lookup (prints result and exits):
+
+```bash
+bun run src/index.ts 10.0.0.1
+bun run src/index.ts 10.0.0.0/24
 ```
 
 ## Build binary (Windows)
